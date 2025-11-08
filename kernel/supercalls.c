@@ -17,14 +17,9 @@
 #include "ksud.h"
 #include "manager.h"
 #include "selinux/selinux.h"
-
-// Forward declarations from core_hook.c
-extern void escape_to_root(void);
-extern void nuke_ext4_sysfs(void);
-extern bool ksu_module_mounted;
-extern int handle_sepolicy(unsigned long arg3, void __user *arg4);
-extern void ksu_sucompat_init(void);
-extern void ksu_sucompat_exit(void);
+#include "core_hook.h"
+#include "objsec.h"
+#include "file_wrapper.h"
 
 // Permission check functions
 bool only_manager(void)
@@ -334,68 +329,91 @@ static int do_set_feature(void __user *arg)
 	return 0;
 }
 
+static int do_get_wrapper_fd(void __user *arg)
+{
+	if (!ksu_file_sid) {
+		return -1;
+	}
+
+	struct ksu_get_wrapper_fd_cmd cmd;
+	int ret;
+
+	if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+		pr_err("get_wrapper_fd: copy_from_user failed\n");
+		return -EFAULT;
+	}
+
+	struct file *f = fget(cmd.fd);
+	if (!f) {
+		return -EBADF;
+	}
+
+	struct ksu_file_wrapper *data = mksu_create_file_wrapper(f);
+	if (data == NULL) {
+		ret = -ENOMEM;
+		goto put_orig_file;
+	}
+
+	struct file *pf = anon_inode_getfile("[mksu_fdwrapper]", &data->ops,
+					     data, f->f_flags);
+	if (IS_ERR(pf)) {
+		ret = PTR_ERR(pf);
+		pr_err("mksu_fdwrapper: anon_inode_getfile failed: %ld\n",
+		       PTR_ERR(pf));
+		goto put_wrapper_data;
+	}
+
+	struct inode *wrapper_inode = file_inode(pf);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) ||                           \
+	defined(KSU_OPTIONAL_SELINUX_INODE)
+	struct inode_security_struct *sec = selinux_inode(wrapper_inode);
+#else
+	struct inode_security_struct *sec =
+		(struct inode_security_struct *)wrapper_inode->i_security;
+#endif
+	if (sec) {
+		sec->sid = ksu_file_sid;
+	}
+
+	ret = get_unused_fd_flags(cmd.flags);
+	if (ret < 0) {
+		pr_err("mksu_fdwrapper: get unused fd failed: %d\n", ret);
+		goto put_wrapper_file;
+	}
+
+	// pr_info("mksu_fdwrapper: installed wrapper fd for %p %d (flags=%d, mode=%d) to %p %d (flags=%d, mode=%d)", f, cmd.fd, f->f_flags, f->f_mode, pf, ret, pf->f_flags, pf->f_mode);
+	// pf->f_mode |= FMODE_READ | FMODE_CAN_READ | FMODE_WRITE | FMODE_CAN_WRITE;
+	fd_install(ret, pf);
+	goto put_orig_file;
+
+put_wrapper_file:
+	fput(pf);
+put_wrapper_data:
+	mksu_delete_file_wrapper(data);
+put_orig_file:
+	fput(f);
+
+	return ret;
+}
+
 // IOCTL handlers mapping table
 static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
-	{ .cmd = KSU_IOCTL_GRANT_ROOT,
-	  .name = "GRANT_ROOT",
-	  .handler = do_grant_root,
-	  .perm_check = allowed_for_su },
-	{ .cmd = KSU_IOCTL_GET_INFO,
-	  .name = "GET_INFO",
-	  .handler = do_get_info,
-	  .perm_check = always_allow },
-	{ .cmd = KSU_IOCTL_REPORT_EVENT,
-	  .name = "REPORT_EVENT",
-	  .handler = do_report_event,
-	  .perm_check = only_root },
-	{ .cmd = KSU_IOCTL_SET_SEPOLICY,
-	  .name = "SET_SEPOLICY",
-	  .handler = do_set_sepolicy,
-	  .perm_check = only_root },
-	{ .cmd = KSU_IOCTL_CHECK_SAFEMODE,
-	  .name = "CHECK_SAFEMODE",
-	  .handler = do_check_safemode,
-	  .perm_check = always_allow },
-	{ .cmd = KSU_IOCTL_GET_ALLOW_LIST,
-	  .name = "GET_ALLOW_LIST",
-	  .handler = do_get_allow_list,
-	  .perm_check = manager_or_root },
-	{ .cmd = KSU_IOCTL_GET_DENY_LIST,
-	  .name = "GET_DENY_LIST",
-	  .handler = do_get_deny_list,
-	  .perm_check = manager_or_root },
-	{ .cmd = KSU_IOCTL_UID_GRANTED_ROOT,
-	  .name = "UID_GRANTED_ROOT",
-	  .handler = do_uid_granted_root,
-	  .perm_check = manager_or_root },
-	{ .cmd = KSU_IOCTL_UID_SHOULD_UMOUNT,
-	  .name = "UID_SHOULD_UMOUNT",
-	  .handler = do_uid_should_umount,
-	  .perm_check = manager_or_root },
-	{ .cmd = KSU_IOCTL_GET_MANAGER_UID,
-	  .name = "GET_MANAGER_UID",
-	  .handler = do_get_manager_uid,
-	  .perm_check = manager_or_root },
-	{ .cmd = KSU_IOCTL_GET_APP_PROFILE,
-	  .name = "GET_APP_PROFILE",
-	  .handler = do_get_app_profile,
-	  .perm_check = only_manager },
-	{ .cmd = KSU_IOCTL_SET_APP_PROFILE,
-	  .name = "SET_APP_PROFILE",
-	  .handler = do_set_app_profile,
-	  .perm_check = only_manager },
-	{ .cmd = KSU_IOCTL_GET_FEATURE,
-	  .name = "GET_FEATURE",
-	  .handler = do_get_feature,
-	  .perm_check = manager_or_root },
-	{ .cmd = KSU_IOCTL_SET_FEATURE,
-	  .name = "SET_FEATURE",
-	  .handler = do_set_feature,
-	  .perm_check = manager_or_root },
-	{ .cmd = 0,
-	  .name = NULL,
-	  .handler = NULL,
-	  .perm_check = NULL } // Sentinel
+	KSU_IOCTL_HANDLER(KSU_IOCTL_GRANT_ROOT, "GRANT_ROOT", do_grant_root, allowed_for_su),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_GET_INFO, "GET_INFO", do_get_info, always_allow),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_REPORT_EVENT, "REPORT_EVENT", do_report_event, only_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_SET_SEPOLICY, "SET_SEPOLICY", do_set_sepolicy, only_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_CHECK_SAFEMODE, "CHECK_SAFEMODE", do_check_safemode, always_allow),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_GET_ALLOW_LIST, "GET_ALLOW_LIST", do_get_allow_list, manager_or_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_GET_DENY_LIST, "GET_DENY_LIST", do_get_deny_list, manager_or_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_UID_GRANTED_ROOT, "UID_GRANTED_ROOT", do_uid_granted_root, manager_or_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_UID_SHOULD_UMOUNT, "UID_SHOULD_UMOUNT", do_uid_should_umount, manager_or_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_GET_MANAGER_UID, "GET_MANAGER_UID", do_get_manager_uid, manager_or_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_GET_APP_PROFILE, "GET_APP_PROFILE", do_get_app_profile, only_manager),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_SET_APP_PROFILE, "SET_APP_PROFILE", do_set_app_profile, only_manager),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_GET_FEATURE, "GET_FEATURE", do_get_feature, manager_or_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_SET_FEATURE, "SET_FEATURE", do_set_feature, manager_or_root),
+	KSU_IOCTL_HANDLER(KSU_IOCTL_GET_WRAPPER_FD, "GET_WRAPPER_FD", do_get_wrapper_fd, manager_or_root),
+	KSU_IOCTL_HANDLER(0, NULL, NULL, NULL) // Sentinel
 };
 
 void ksu_supercalls_init(void)
@@ -417,7 +435,7 @@ static long anon_ksu_ioctl(struct file *filp, unsigned int cmd,
 	int i;
 
 #ifdef CONFIG_KSU_DEBUG
-	pr_info("ksu ioctl: cmd=0x%x from uid=%d\n", cmd, current_uid().val);
+	pr_info("ksu_ioctl: cmd=0x%x from uid=%d\n", cmd, current_uid().val);
 #endif
 
 	for (i = 0; ksu_ioctl_handlers[i].handler; i++) {
@@ -425,7 +443,7 @@ static long anon_ksu_ioctl(struct file *filp, unsigned int cmd,
 			// Check permission first
 			if (ksu_ioctl_handlers[i].perm_check &&
 			    !ksu_ioctl_handlers[i].perm_check()) {
-				pr_warn("ksu ioctl: permission denied for cmd=0x%x uid=%d\n",
+				pr_warn("ksu_ioctl: permission denied for cmd=0x%x uid=%d\n",
 					cmd, current_uid().val);
 				return -EPERM;
 			}
@@ -434,14 +452,16 @@ static long anon_ksu_ioctl(struct file *filp, unsigned int cmd,
 		}
 	}
 
-	pr_warn("ksu ioctl: unsupported command 0x%x\n", cmd);
+	pr_warn("ksu_ioctl: unsupported command 0x%x\n", cmd);
 	return -ENOTTY;
 }
 
 // File release handler
 static int anon_ksu_release(struct inode *inode, struct file *filp)
 {
+#ifdef CONFIG_KSU_DEBUG
 	pr_info("ksu fd released\n");
+#endif
 	return 0;
 }
 
@@ -478,7 +498,7 @@ int ksu_install_fd(void)
 	// Install fd
 	fd_install(fd, filp);
 
-	pr_info("ksu fd installed: %d for pid %d\n", fd, current->pid);
+	pr_info("ksu fd [%d] installed for pid %d\n", fd, current->pid);
 
 	return fd;
 }

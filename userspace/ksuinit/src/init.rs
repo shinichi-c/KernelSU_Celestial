@@ -2,13 +2,13 @@ use std::io::{ErrorKind, Write};
 
 use crate::loader::load_module;
 use anyhow::Result;
-use rustix::fs::{chmodat, symlink, unlink, AtFlags, Mode};
+use rustix::fs::{AtFlags, Mode, chmodat, symlink, unlink};
 use rustix::{
     fd::AsFd,
-    fs::{access, makedev, mkdir, mknodat, Access, FileType, CWD},
+    fs::{Access, CWD, FileType, access, makedev, mkdir, mknodat},
     mount::{
-        fsconfig_create, fsmount, fsopen, move_mount, unmount, FsMountFlags, FsOpenFlags,
-        MountAttrFlags, MoveMountFlags, UnmountFlags,
+        FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, UnmountFlags, fsconfig_create,
+        fsmount, fsopen, move_mount, unmount,
     },
 };
 
@@ -128,7 +128,7 @@ pub fn init() -> Result<()> {
     // Setup kernel log first
     setup_kmsg();
 
-    log::info!("{}", s!("Hello, KernelSU!"));
+    log::info!("{}", s!("Hello, RKSU!"));
 
     // mount /proc and /sys to access kernel interface
     let _dontdrop = prepare_mount();
@@ -137,7 +137,7 @@ pub fn init() -> Result<()> {
     unlimit_kmsg();
 
     if has_kernelsu() {
-        log::info!("{}", s!("KernelSU may be already loaded in kernel, skip!"));
+        log::info!("{}", s!("KernelSU maybe already loaded in kernel, skip!"));
     } else {
         log::info!("{}", s!("Loading kernelsu.ko.."));
         if let Err(e) = load_module(s!("/kernelsu.ko")) {
@@ -167,7 +167,7 @@ pub fn init() -> Result<()> {
 }
 
 fn has_kernelsu_legacy() -> bool {
-    use syscalls::{syscall, Sysno};
+    use syscalls::{Sysno, syscall};
     let mut version = 0;
     const CMD_GET_VERSION: i32 = 2;
     unsafe {
@@ -185,7 +185,7 @@ fn has_kernelsu_legacy() -> bool {
 }
 
 fn has_kernelsu_v2() -> bool {
-    use syscalls::{syscall, Sysno};
+    use syscalls::{Sysno, syscall};
     const KSU_INSTALL_MAGIC1: u32 = 0xDEADBEEF;
     const KSU_INSTALL_MAGIC2: u32 = 0xCAFEBABE;
     const KSU_IOCTL_GET_INFO: u32 = 0x80004b02; // _IOC(_IOC_READ, 'K', 2, 0)

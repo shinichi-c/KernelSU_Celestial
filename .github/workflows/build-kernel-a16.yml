@@ -21,8 +21,14 @@ jobs:
       matrix:
         include:
           - version: "6.12"
+            sub_level: 23
+            os_patch_level: 2025-06
+          - version: "6.12"
+            sub_level: 30
+            os_patch_level: 2025-07
+          - version: "6.12"
             sub_level: 38
-            os_patch_level: 2025-08
+            os_patch_level: 2025-09
     uses: ./.github/workflows/gki-kernel.yml
     secrets: inherit
     with:
@@ -90,7 +96,7 @@ jobs:
           export MKBOOTIMG=$GITHUB_WORKSPACE/mkbootimg/mkbootimg.py
           export UNPACK_BOOTIMG=$GITHUB_WORKSPACE/mkbootimg/unpack_bootimg.py
           cd $GITHUB_WORKSPACE/KernelSU
-          export VERSION=$(($(git rev-list --count HEAD) + 10200))
+          export VERSION=$(($(git rev-list --count HEAD) + 20000))
           echo "VERSION: $VERSION"
           cd -
           bash $GITHUB_WORKSPACE/KernelSU/.github/scripts/build_a13.sh
